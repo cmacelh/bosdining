@@ -42,3 +42,6 @@ export function getBookingUrl(
       return `https://www.google.com/search?q=${q}+boston+reservation`;
   }
 }
+
+/** Alias used by the UI layer. */
+export type Platform = BookingPlatform;
