@@ -17,6 +17,14 @@ export interface Restaurant {
   mustOrder: string[];
   slots: string[];
   websiteUri?: string;
+  /** news = verified from dining news; fallback = <150-review heuristic; scout = mood/craving search */
+  discovery?: "news" | "fallback" | "scout";
+  mapsUri?: string;
+  address?: string;
+  hours?: string[];
+  openNow?: boolean;
+  photoName?: string;
+  source?: { publisher: string; title: string; url: string; publishedAt: string };
 }
 
 export interface FeedbackEntry {
@@ -434,9 +442,32 @@ function mergeNew(prev: Restaurant[], incoming: Restaurant[]): Restaurant[] {
   return incoming.filter((r) => !existing.has(r.name.toLowerCase()));
 }
 
+type Tab = "concierge" | "newOpenings" | "scouted" | "myFeedback";
+
+/** Today's line from Google's weekdayDescriptions ("Monday: 5:00 – 10:00 PM"). */
+function todaysHours(hours?: string[]): string | null {
+  if (!hours?.length) return null;
+  const day = new Date().toLocaleDateString("en-US", { weekday: "long" });
+  return hours.find((h) => h.startsWith(day)) ?? null;
+}
+
+/** Blend mood-matched new openings into the curated list (every 3rd slot), VIPs stay on top. */
+function blendIntoMain(list: Restaurant[]): Restaurant[] {
+  const vips = list.filter((r) => r.isVip);
+  const rest = list.filter((r) => !r.isVip && !r.isNewOpening);
+  const fresh = list.filter((r) => !r.isVip && r.isNewOpening);
+  const out: Restaurant[] = [...vips];
+  let f = 0;
+  rest.forEach((r, i) => {
+    out.push(r);
+    if ((i + 1) % 3 === 0 && f < fresh.length) out.push(fresh[f++]);
+  });
+  return [...out, ...fresh.slice(f)];
+}
+
 export default function TableScoutApp() {
   const [restaurants, setRestaurants] = useState<Restaurant[]>(INITIAL_RESTAURANTS);
-  const [activeTab, setActiveTab] = useState<"concierge" | "newOpenings" | "myFeedback">("concierge");
+  const [activeTab, setActiveTab] = useState<Tab>("concierge");
   const [activeThemeKey, setActiveThemeKey] = useState<string>("obsidianDark");
   const [selectedVibe, setSelectedVibe] = useState<string>("All Vibes");
   const [vipOnly, setVipOnly] = useState<boolean>(false);
@@ -447,6 +478,7 @@ export default function TableScoutApp() {
   const [activePromptId, setActivePromptId] = useState<string | null>(null);
   const [scoutBannerMessage, setScoutBannerMessage] = useState<string>("");
   const [dismissedIds, setDismissedIds] = useState<string[]>([]);
+  const [newFeedStatus, setNewFeedStatus] = useState<"loading" | "ready" | "error">("loading");
 
   // Tasting Journal
   const [feedbackMap, setFeedbackMap] = useState<Record<string, FeedbackEntry>>({});
@@ -476,14 +508,16 @@ export default function TableScoutApp() {
       /* corrupted storage — ignore */
     }
 
-    fetch("/api/openings")
+    // Newly opened spots, sourced from Boston dining news + verified via Google Places
+    fetch("/api/openings/new")
       .then((r) => r.json())
       .then((data) => {
         if (Array.isArray(data.openings)) {
           setRestaurants((prev) => [...prev, ...mergeNew(prev, data.openings)]);
-        }
+          setNewFeedStatus("ready");
+        } else setNewFeedStatus("error");
       })
-      .catch(() => {});
+      .catch(() => setNewFeedStatus("error"));
 
     fetch("/api/feedback")
       .then((r) => r.json())
@@ -543,13 +577,13 @@ export default function TableScoutApp() {
       setRestaurants((prev) => [...mergeNew(prev, incoming), ...prev]);
       // Un-dismiss anything the user explicitly scouted again
       setDismissedIds((prev) => prev.filter((id) => !incoming.some((i) => i.id === id)));
-      setActiveTab("newOpenings");
+      setActiveTab("scouted");
       setVipOnly(false);
       setSelectedVibe("All Vibes");
       setSearchQuery("");
       setScoutBannerMessage(
         fresh.length > 0
-          ? `✓ Added ${fresh.length} fresh recommendation${fresh.length === 1 ? "" : "s"} to New Openings`
+          ? `✓ Added ${fresh.length} fresh recommendation${fresh.length === 1 ? "" : "s"} to Scouted`
           : incoming.length > 0
           ? `✓ ${incoming.length} matches — already on your list`
           : "No matches found. Try a different craving."
@@ -658,11 +692,15 @@ export default function TableScoutApp() {
     [restaurants, dismissedIds]
   );
   const newOpeningsRoster = visibleRestaurants.filter((r) => r.isNewOpening);
+  const scoutedRoster = visibleRestaurants.filter((r) => r.discovery === "scout");
+  const moodActive = selectedVibe !== "All Vibes";
 
-  const filtered = visibleRestaurants
-    .filter((r) => {
+  const matching = visibleRestaurants.filter((r) => {
       if (activeTab === "newOpenings" && !r.isNewOpening) return false;
+      if (activeTab === "scouted" && r.discovery !== "scout") return false;
       if (activeTab === "myFeedback" && !feedbackMap[r.id]) return false;
+      // Main list: new openings only appear when they match the mood you picked
+      if (activeTab === "concierge" && r.isNewOpening && !r.isVip && !moodActive) return false;
       if (vipOnly && !r.isVip) return false;
       if (selectedVibe !== "All Vibes" && !r.vibes.includes(selectedVibe)) return false;
       if (searchQuery.trim()) {
@@ -675,8 +713,20 @@ export default function TableScoutApp() {
         );
       }
       return true;
-    })
-    .sort((a, b) => Number(b.isVip) - Number(a.isVip));
+    });
+
+  const filtered =
+    activeTab === "concierge"
+      ? blendIntoMain(matching)
+      : activeTab === "newOpenings"
+      ? [...matching].sort(
+          (a, b) =>
+            Number(b.discovery === "news") - Number(a.discovery === "news") ||
+            (b.source?.publishedAt ?? "").localeCompare(a.source?.publishedAt ?? "")
+        )
+      : [...matching].sort((a, b) => Number(b.isVip) - Number(a.isVip));
+  const moodMatchedNewCount =
+    activeTab === "concierge" ? filtered.filter((r) => r.isNewOpening && !r.isVip).length : 0;
 
   const loggedCount = Object.keys(feedbackMap).length;
   const vipCount = visibleRestaurants.filter((r) => r.isVip).length;
@@ -696,7 +746,13 @@ export default function TableScoutApp() {
     activeTab === "myFeedback"
       ? "No visits logged yet. Tap ✎ Log on any card after you dine."
       : activeTab === "newOpenings"
-      ? "No live recommendations yet. Tap a craving above to scout."
+      ? newFeedStatus === "loading"
+        ? "Reading Eater Boston, Boston.com and Boston Magazine for new openings…"
+        : newFeedStatus === "error"
+        ? "Couldn't load new openings right now. Try again shortly."
+        : "No newly opened spots match this mood."
+      : activeTab === "scouted"
+      ? "Nothing scouted yet. Tap a craving above."
       : "No spots match these filters.";
 
   return (
@@ -721,7 +777,7 @@ export default function TableScoutApp() {
             </span>
           </div>
           <p style={{ color: theme.textMuted }} className="text-xs mt-1">
-            {vipCount} Pinned VIPs • {newOpeningsRoster.length} Live Recommendations • {loggedCount} Visits Logged
+            {vipCount} Pinned VIPs • {newOpeningsRoster.length} New Openings • {loggedCount} Visits Logged
             {cloudSync === "on" && " • ☁ Synced"}
             {cloudSync === "local" && " • Saved on this device"}
           </p>
@@ -731,7 +787,8 @@ export default function TableScoutApp() {
           {(
             [
               ["concierge", `♛ All Spots (${visibleRestaurants.length})`, theme.accentGold],
-              ["newOpenings", `✨ New Openings For You (${newOpeningsRoster.length})`, theme.accentPink],
+              ["newOpenings", `✨ New (${newFeedStatus === "loading" ? "…" : newOpeningsRoster.length})`, theme.accentPink],
+              ["scouted", `⚡ Scouted (${scoutedRoster.length})`, theme.accentPink],
               ["myFeedback", `✎ My Tasting Log (${loggedCount})`, theme.accentPink],
             ] as const
           ).map(([key, label, activeColor]) => (
@@ -1073,6 +1130,24 @@ export default function TableScoutApp() {
         </div>
       )}
 
+      {/* Context strip */}
+      {activeTab === "newOpenings" && (
+        <p style={{ color: theme.textMuted }} className="max-w-6xl mx-auto text-xs -mt-4 mb-6">
+          Newly opened spots from Eater Boston, Boston.com and Boston Magazine, verified with Google Places (address,
+          hours, photos). Places Google can't match or lists as closed are dropped. Spots marked “Likely new” are a
+          fallback based on low review counts, shown only when news coverage is thin.
+        </p>
+      )}
+      {activeTab === "concierge" && (
+        <p style={{ color: theme.textMuted }} className="max-w-6xl mx-auto text-xs -mt-4 mb-6">
+          {moodActive
+            ? moodMatchedNewCount > 0
+              ? `✨ ${moodMatchedNewCount} newly opened spot${moodMatchedNewCount === 1 ? "" : "s"} matching “${selectedVibe}” blended in.`
+              : `No newly opened spots match “${selectedVibe}” right now.`
+            : "Pick a mood to blend in matching newly opened spots."}
+        </p>
+      )}
+
       {/* Cards */}
       <div className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-6">
         {filtered.map((r) => {
@@ -1086,9 +1161,18 @@ export default function TableScoutApp() {
                 backgroundColor: theme.bgCard,
                 borderColor: r.isVip ? `${theme.accentGold}88` : `${theme.accentPink}44`,
               }}
-              className="border rounded-xl p-6 shadow-xl flex flex-col justify-between transition-all"
+              className="border rounded-xl p-6 shadow-xl flex flex-col justify-between transition-all overflow-hidden"
             >
               <div>
+                {r.photoName && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={`/api/places/photo?name=${encodeURIComponent(r.photoName)}&w=800`}
+                    alt={`${r.name}`}
+                    loading="lazy"
+                    className="-mx-6 -mt-6 mb-4 w-[calc(100%+3rem)] max-w-none h-44 object-cover"
+                  />
+                )}
                 <div className="flex justify-between items-start mb-3 gap-3">
                   <div>
                     <div className="flex flex-wrap items-center gap-1.5 mb-1">
@@ -1105,7 +1189,15 @@ export default function TableScoutApp() {
                           style={{ backgroundColor: `${theme.accentPink}30`, color: theme.panelAccent }}
                           className="text-[10px] uppercase tracking-widest px-2 py-0.5 rounded font-mono font-semibold"
                         >
-                          ✨ {r.debutBadge || "NEW OPENING"}
+                          ✨ {r.discovery === "fallback" ? "LIKELY NEW" : r.debutBadge || "NEW OPENING"}
+                        </span>
+                      )}
+                      {r.discovery === "scout" && (
+                        <span
+                          style={{ borderColor: `${theme.accentPink}66`, color: theme.textMuted }}
+                          className="text-[10px] uppercase tracking-widest px-2 py-0.5 rounded font-mono border"
+                        >
+                          ⚡ SCOUTED
                         </span>
                       )}
                       <span
@@ -1141,7 +1233,7 @@ export default function TableScoutApp() {
                     >
                       ✎ {myLog ? `${myLog.rating}★` : "Log"}
                     </button>
-                    {r.isNewOpening && !r.isVip && (
+                    {(r.isNewOpening || r.discovery === "scout") && !r.isVip && (
                       <button
                         onClick={() => dismissOpening(r.id)}
                         title="Dismiss recommendation"
@@ -1194,17 +1286,52 @@ export default function TableScoutApp() {
                   <p style={{ color: theme.accentGold }} className="font-medium">
                     <strong>Must-Order:</strong> {r.mustOrder.join(", ")}
                   </p>
-                  {r.websiteUri && (
-                    <a
-                      href={r.websiteUri}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{ color: theme.panelAccent }}
-                      className="underline"
-                    >
-                      Website ↗
-                    </a>
+                  {r.address && (
+                    <p>
+                      <strong>Address:</strong> {r.address}
+                    </p>
                   )}
+                  {r.hours && r.hours.length > 0 && (
+                    <details>
+                      <summary className="cursor-pointer">
+                        <strong>Hours:</strong> {todaysHours(r.hours) ?? "See weekly hours"}
+                        {r.openNow !== undefined && (
+                          <span style={{ color: r.openNow ? theme.accentGold : theme.textMuted }} className="ml-2 font-semibold">
+                            {r.openNow ? "• Open now" : "• Closed now"}
+                          </span>
+                        )}
+                      </summary>
+                      <ul className="mt-1 ml-4 space-y-0.5 opacity-90">
+                        {r.hours.map((h) => (
+                          <li key={h}>{h}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  <div className="flex flex-wrap gap-x-4 gap-y-1">
+                    {r.source && (
+                      <a
+                        href={r.source.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ color: theme.panelAccent }}
+                        className="underline"
+                        title={r.source.title}
+                      >
+                        Via {r.source.publisher} ({new Date(r.source.publishedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}) ↗
+                      </a>
+                    )}
+                    {r.websiteUri && (
+                      <a href={r.websiteUri} target="_blank" rel="noopener noreferrer" style={{ color: theme.panelAccent }} className="underline">
+                        Website ↗
+                      </a>
+                    )}
+                    {r.mapsUri && (
+                      <a href={r.mapsUri} target="_blank" rel="noopener noreferrer" style={{ color: theme.panelAccent }} className="underline">
+                        Google Maps ↗
+                      </a>
+                    )}
+                  </div>
                 </div>
               </div>
 

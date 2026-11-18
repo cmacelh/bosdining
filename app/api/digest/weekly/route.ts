@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
-import { DEFAULT_OPENINGS_QUERY, scoutOpenings, type ScoutedRestaurant } from "@/lib/places";
+import type { ScoutedRestaurant } from "@/lib/places";
+import { getNewOpenings } from "@/lib/newsOpenings";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -16,7 +18,9 @@ function renderDigest(openings: ScoutedRestaurant[]): string {
         <div style="font-size:10px;letter-spacing:2px;color:#F6C6D4;text-transform:uppercase">✨ ${esc(r.debutBadge)} • ${esc(r.neighborhood)}</div>
         <div style="font-family:Georgia,serif;font-size:20px;color:#DBDBDB;margin:4px 0">${esc(r.name)}</div>
         <div style="font-size:12px;color:#9CA3AF">${esc(r.cuisine)}</div>
+        ${r.address ? `<div style="font-size:12px;color:#9CA3AF;margin-top:2px">${esc(r.address)}</div>` : ""}
         <div style="font-size:12px;color:#DBDBDB;margin-top:6px">${esc(r.insiderTip)}</div>
+        ${r.source ? `<a href="${esc(r.source.url)}" style="font-size:12px;color:#F6C6D4;margin-right:12px">Via ${esc(r.source.publisher)} ↗</a>` : ""}
         ${r.websiteUri ? `<a href="${esc(r.websiteUri)}" style="font-size:12px;color:#C6B16C">Visit website ↗</a>` : ""}
       </td></tr>`
     )
@@ -30,7 +34,8 @@ function renderDigest(openings: ScoutedRestaurant[]): string {
 }
 
 async function sendDigest(to: string) {
-  const openings = await scoutOpenings(DEFAULT_OPENINGS_QUERY, 8);
+  const { openings: all } = await getNewOpenings();
+  const openings = all.slice(0, 10);
   const html = renderDigest(openings);
   const apiKey = process.env.RESEND_API_KEY;
 
