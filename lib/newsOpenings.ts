@@ -58,6 +58,7 @@ export interface NewsDiagnostics {
   droppedClosed: number;
   droppedUpcoming: number;
   fallbackUsed: number;
+  stories: { publisher: string; title: string; ageDays: number; opening: boolean; candidates: number }[];
 }
 
 /* ---------------- tiny XML/HTML helpers (no deps) ---------------- */
@@ -227,6 +228,7 @@ async function buildNewOpenings(): Promise<{ openings: ScoutedRestaurant[]; diag
     droppedClosed: 0,
     droppedUpcoming: 0,
     fallbackUsed: 0,
+    stories: [],
   };
 
   // 1) Feeds
@@ -239,6 +241,15 @@ async function buildNewOpenings(): Promise<{ openings: ScoutedRestaurant[]; diag
       return items;
     })
   );
+  for (const i of feedResults.flat()) {
+    diag.stories.push({
+      publisher: i.publisher,
+      title: i.title,
+      ageDays: Math.round((Date.now() - i.publishedAt.getTime()) / 86400_000),
+      opening: isOpeningStory(i),
+      candidates: 0,
+    });
+  }
   const stories = feedResults
     .flat()
     .filter((i) => i.publishedAt.getTime() >= cutoff && isOpeningStory(i))
@@ -260,6 +271,7 @@ async function buildNewOpenings(): Promise<{ openings: ScoutedRestaurant[]; diag
       const sections = sectionsFromHtml(html)
         .map((sec) => ({ ...sec, clean: cleanHeading(sec.heading) }))
         .filter((sec) => sec.clean);
+      const before = candidates.length;
       if (titleName) {
         candidates.push({ name: titleName, hint: "", context: `${item.title}. ${fullText}`, item, kind: "title" });
       }
@@ -272,6 +284,8 @@ async function buildNewOpenings(): Promise<{ openings: ScoutedRestaurant[]; diag
         // let Places find it from the lede, then require the name to appear in the story.
         candidates.push({ name: "", hint: "", context: `${item.title}. ${fullText}`, item, kind: "story" });
       }
+      const d = diag.stories.find((x) => x.title === item.title && x.publisher === item.publisher);
+      if (d) d.candidates = candidates.length - before;
     })
   );
 
@@ -380,4 +394,4 @@ async function buildNewOpenings(): Promise<{ openings: ScoutedRestaurant[]; diag
 
 /** Cached for 6h so we don't hammer news sites or the Places API. */
 export { buildNewOpenings };
-export const getNewOpenings = unstable_cache(buildNewOpenings, ["news-openings-v1"], { revalidate: 21600 });
+export const getNewOpenings = unstable_cache(buildNewOpenings, ["news-openings-v2"], { revalidate: 21600 });
